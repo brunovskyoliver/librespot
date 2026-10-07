@@ -30,6 +30,7 @@ use crate::{
         provider::IsProvider,
         {ConnectConfig, ConnectState},
     },
+    view::{ConnectView, RemotePlayback},
 };
 use futures_util::StreamExt;
 use librespot_protocol::context_page::ContextPage;
@@ -41,7 +42,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{mpsc, watch},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -110,6 +114,11 @@ struct SpircTask {
     update_state: bool,
 
     spirc_id: usize,
+
+    /// Smalltify fork (F2): publishes [ConnectView] to [Spirc::state] readers.
+    view: watch::Sender<ConnectView>,
+    /// Smalltify fork (F2): playback on another device from the latest cluster.
+    remote: Option<RemotePlayback>,
 }
 
 static SPIRC_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -149,6 +158,7 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
     disconnected_playback: Arc<Mutex<Option<Arc<PlaybackSnapshot>>>>,
+    state: watch::Receiver<ConnectView>,
 }
 
 /// In-memory playback retained when an active Connect session unexpectedly ends.
@@ -193,6 +203,13 @@ impl std::fmt::Debug for PlaybackSnapshot {
 }
 
 impl Spirc {
+    /// A bounded view of the Connect state: context, current track, up to 50 next and 20
+    /// previous tracks, shuffle and repeat, whether this device is active, and playback on
+    /// another device. Updated by the event loop whenever the view changes (Smalltify fork F2).
+    pub fn state(&self) -> watch::Receiver<ConnectView> {
+        self.state.clone()
+    }
+
     /// Playback retained before an unexpected disconnect clears session state.
     /// Available after the event-loop future returned, and absent for an
     /// inactive device, stopped playback, or an intentional shutdown.
@@ -286,6 +303,7 @@ impl Spirc {
         let player_events = player.get_player_event_channel();
 
         let disconnected_playback = Arc::new(Mutex::new(None));
+        let (view, state) = watch::channel(ConnectView::default());
         let mut task = SpircTask {
             disconnected_playback: Arc::clone(&disconnected_playback),
             player,
@@ -319,11 +337,15 @@ impl Spirc {
             update_state: false,
 
             spirc_id,
+
+            view,
+            remote: None,
         };
 
         let spirc = Spirc {
             commands: cmd_tx,
             disconnected_playback,
+            state,
         };
 
         let initial_volume = task.connect_state.device_info().volume;
@@ -647,6 +669,8 @@ impl SpircTask {
                 },
                 else => break
             }
+
+            self.publish_view();
         }
 
         if !self.shutdown && self.connect_state.is_active() {
@@ -671,6 +695,8 @@ impl SpircTask {
                 error!("error during disconnecting: {why}")
             }
         }
+
+        self.publish_view();
 
         // this should clear the active session id, leaving an empty state
         if let Err(why) = self.session.spclient().delete_connect_state_request().await {
@@ -960,6 +986,7 @@ impl SpircTask {
         );
 
         self.connect_established = true;
+        self.remote = RemotePlayback::from_cluster(&cluster, self.session.device_id());
 
         let same_session = cluster.player_state.session_id == self.session.session_id()
             || cluster.player_state.session_id.is_empty();
@@ -1048,6 +1075,7 @@ impl SpircTask {
         );
 
         if let Some(cluster) = cluster_update.cluster.take() {
+            self.remote = RemotePlayback::from_cluster(&cluster, self.session.device_id());
             let became_inactive = self.connect_state.is_active()
                 && cluster.active_device_id != self.session.device_id();
             if became_inactive {
@@ -1920,6 +1948,23 @@ impl SpircTask {
         self.connect_state.set_status(&self.play_status);
 
         Ok(())
+    }
+
+    /// Publishes the current [ConnectView] if it differs from the last one (Smalltify fork F2).
+    /// Called after every handled event, so readers see each change without polling.
+    fn publish_view(&self) {
+        let view = ConnectView::new(
+            self.connect_state.player(),
+            self.connect_state.is_active(),
+            self.remote.as_ref(),
+        );
+        self.view.send_if_modified(|current| {
+            let changed = *current != view;
+            if changed {
+                *current = view;
+            }
+            changed
+        });
     }
 
     async fn notify(&mut self) -> Result<(), Error> {

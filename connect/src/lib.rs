@@ -13,7 +13,9 @@ mod model;
 mod shuffle_vec;
 mod spirc;
 mod state;
+pub mod view;
 
 pub use model::*;
 pub use spirc::*;
 pub use state::*;
+pub use view::{ConnectView, QueueItem, QueueProvider, RemotePlayback};
