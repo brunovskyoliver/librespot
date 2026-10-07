@@ -13,6 +13,22 @@ pub(crate) const IOS_CLIENT_ID: &str = "58bd3c95768941ea9eb4350aaa033eb3";
 /// See [std::env::consts::OS]
 pub const OS: &str = std::env::consts::OS;
 
+/// The OS whose identity librespot presents to Spotify in the access-point hello, the
+/// client-token request and login5.
+///
+/// Smalltify fork (F1): iOS presents itself as desktop Linux. Access points answer
+/// `TryAnotherAP` to every client hello that names an iPhone platform (librespot#1477;
+/// measured on an iPhone in Smalltify 001, commit 921c7c0), and Smalltify plays with the
+/// desktop client ID, for which iOS client data is refused by the client-token endpoint.
+/// `Spirc::new` treats client-token and login5 failures as fatal, so all three must agree.
+/// Upstream already spoofs Android as Linux in the client hello for the same reason.
+pub fn identity_os(os: &str) -> &str {
+    match os {
+        "ios" => "linux",
+        other => other,
+    }
+}
+
 // valid versions for some os:
 // 'android': 30
 // 'ios': 17

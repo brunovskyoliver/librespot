@@ -110,39 +110,7 @@ where
     let mut client_nonce = vec![0; 0x10];
     rand::rng().fill_bytes(&mut client_nonce);
 
-    let platform = match crate::config::OS {
-        "freebsd" | "netbsd" | "openbsd" => match ARCH {
-            "x86_64" => Platform::PLATFORM_FREEBSD_X86_64,
-            _ => Platform::PLATFORM_FREEBSD_X86,
-        },
-        "ios" => match ARCH {
-            "aarch64" => Platform::PLATFORM_IPHONE_ARM64,
-            _ => Platform::PLATFORM_IPHONE_ARM,
-        },
-        // Rather than sending `Platform::PLATFORM_ANDROID_ARM` for "android",
-        // we are spoofing "android" as "linux", as otherwise during Session::connect
-        // all APs will reject the client with TryAnotherAP, no matter the credentials
-        // used was obtained via OAuth using KEYMASTER or ANDROID's client ID or
-        // Login5Manager::login
-        "linux" | "android" => match ARCH {
-            "arm" | "aarch64" => Platform::PLATFORM_LINUX_ARM,
-            "blackfin" => Platform::PLATFORM_LINUX_BLACKFIN,
-            "mips" => Platform::PLATFORM_LINUX_MIPS,
-            "sh" => Platform::PLATFORM_LINUX_SH,
-            "x86_64" => Platform::PLATFORM_LINUX_X86_64,
-            _ => Platform::PLATFORM_LINUX_X86,
-        },
-        "macos" => match ARCH {
-            "ppc" | "ppc64" => Platform::PLATFORM_OSX_PPC,
-            "x86_64" => Platform::PLATFORM_OSX_X86_64,
-            _ => Platform::PLATFORM_OSX_X86,
-        },
-        "windows" => match ARCH {
-            "arm" | "aarch64" | "x86_64" => Platform::PLATFORM_WIN32_X86_64,
-            _ => Platform::PLATFORM_WIN32_X86,
-        },
-        _ => Platform::PLATFORM_LINUX_X86,
-    };
+    let platform = platform_for(crate::config::OS, ARCH);
 
     #[cfg(debug_assertions)]
     const PRODUCT_FLAGS: ProductFlags = ProductFlags::PRODUCT_FLAG_DEV_BUILD;
@@ -244,6 +212,41 @@ async fn read_into_accumulator<'b, T: AsyncRead + Unpin>(
     Ok(&mut acc[offset..])
 }
 
+/// The platform reported in the client hello for `os`/`arch`.
+fn platform_for(os: &str, arch: &str) -> Platform {
+    match crate::config::identity_os(os) {
+        "freebsd" | "netbsd" | "openbsd" => match arch {
+            "x86_64" => Platform::PLATFORM_FREEBSD_X86_64,
+            _ => Platform::PLATFORM_FREEBSD_X86,
+        },
+        // Smalltify fork (F1): "ios" arrives here as "linux" through `identity_os`; an
+        // iPhone platform makes every access point answer TryAnotherAP (librespot#1477).
+        // Rather than sending `Platform::PLATFORM_ANDROID_ARM` for "android",
+        // we are spoofing "android" as "linux", as otherwise during Session::connect
+        // all APs will reject the client with TryAnotherAP, no matter the credentials
+        // used was obtained via OAuth using KEYMASTER or ANDROID's client ID or
+        // Login5Manager::login
+        "linux" | "android" => match arch {
+            "arm" | "aarch64" => Platform::PLATFORM_LINUX_ARM,
+            "blackfin" => Platform::PLATFORM_LINUX_BLACKFIN,
+            "mips" => Platform::PLATFORM_LINUX_MIPS,
+            "sh" => Platform::PLATFORM_LINUX_SH,
+            "x86_64" => Platform::PLATFORM_LINUX_X86_64,
+            _ => Platform::PLATFORM_LINUX_X86,
+        },
+        "macos" => match arch {
+            "ppc" | "ppc64" => Platform::PLATFORM_OSX_PPC,
+            "x86_64" => Platform::PLATFORM_OSX_X86_64,
+            _ => Platform::PLATFORM_OSX_X86,
+        },
+        "windows" => match arch {
+            "arm" | "aarch64" | "x86_64" => Platform::PLATFORM_WIN32_X86_64,
+            _ => Platform::PLATFORM_WIN32_X86,
+        },
+        _ => Platform::PLATFORM_LINUX_X86,
+    }
+}
+
 fn compute_keys(shared_secret: &[u8], packets: &[u8]) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     type HmacSha1 = Hmac<Sha1>;
 
@@ -266,4 +269,43 @@ fn compute_keys(shared_secret: &[u8], packets: &[u8]) -> io::Result<(Vec<u8>, Ve
         data[0x14..0x34].to_vec(),
         data[0x34..0x54].to_vec(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ios_reports_the_linux_platform_in_the_client_hello() {
+        assert_eq!(platform_for("ios", "aarch64"), Platform::PLATFORM_LINUX_ARM);
+        assert_eq!(platform_for("ios", "arm"), Platform::PLATFORM_LINUX_ARM);
+    }
+
+    #[test]
+    fn other_platforms_are_unchanged() {
+        assert_eq!(
+            platform_for("linux", "aarch64"),
+            Platform::PLATFORM_LINUX_ARM
+        );
+        assert_eq!(
+            platform_for("android", "aarch64"),
+            Platform::PLATFORM_LINUX_ARM
+        );
+        assert_eq!(
+            platform_for("linux", "x86_64"),
+            Platform::PLATFORM_LINUX_X86_64
+        );
+        assert_eq!(
+            platform_for("macos", "x86_64"),
+            Platform::PLATFORM_OSX_X86_64
+        );
+        assert_eq!(
+            platform_for("windows", "aarch64"),
+            Platform::PLATFORM_WIN32_X86_64
+        );
+        assert_eq!(
+            platform_for("freebsd", "x86_64"),
+            Platform::PLATFORM_FREEBSD_X86_64
+        );
+    }
 }

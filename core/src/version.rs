@@ -46,7 +46,13 @@ pub fn spotify_version() -> String {
 }
 
 pub fn spotify_semantic_version() -> String {
-    match crate::config::OS {
+    spotify_semantic_version_for(crate::config::OS)
+}
+
+/// The client version matching the platform data sent for `os` (see
+/// [crate::config::identity_os]).
+pub fn spotify_semantic_version_for(os: &str) -> String {
+    match os {
         "android" | "ios" => SPOTIFY_MOBILE_VERSION.to_owned(),
         _ => SPOTIFY_SEMANTIC_VERSION.to_string(),
     }

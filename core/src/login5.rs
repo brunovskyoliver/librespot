@@ -1,4 +1,4 @@
-use crate::config::OS;
+use crate::config::{OS, identity_os};
 use crate::spclient::CLIENT_TOKEN;
 use crate::token::Token;
 use crate::{Error, SessionConfig, util};
@@ -80,7 +80,9 @@ impl Login5Manager {
             // if their Credentials::with_access_token was obtained there, assuming
             // they have overriden the SessionConfig::client_id with the Keymaster's.
             _ if matches!(login, Login_method::StoredCredential(_)) => self.session().client_id(),
-            _ => SessionConfig::default().client_id,
+            // Smalltify fork (F1): use the client ID of the identity OS (desktop on iOS),
+            // matching the client-token request.
+            _ => SessionConfig::default_for_os(identity_os(OS)).client_id,
         };
 
         let mut login_request = LoginRequest {

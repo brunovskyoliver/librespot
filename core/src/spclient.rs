@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::config::{OS, os_version};
+use crate::config::{OS, identity_os, os_version};
 use crate::{
     Error, FileId, SpotifyId, SpotifyUri,
     apresolve::SocketAddress,
@@ -24,7 +24,7 @@ use crate::{
     },
     token::Token,
     util,
-    version::spotify_semantic_version,
+    version::spotify_semantic_version_for,
 };
 use bytes::Bytes;
 use data_encoding::HEXUPPER_PERMISSIVE;
@@ -171,12 +171,9 @@ impl SpClient {
 
         debug!("Client token unavailable or expired, requesting new token.");
 
-        let mut request = ClientTokenRequest::new();
-        request.request_type = ClientTokenRequestType::REQUEST_CLIENT_DATA_REQUEST.into();
-
-        let client_data = request.mut_client_data();
-
-        client_data.client_version = spotify_semantic_version();
+        // Smalltify fork (F1): present the identity OS (desktop Linux on iOS), so the client
+        // ID and platform data match the client hello; see `identity_os`.
+        let os = identity_os(OS);
 
         // Current state of affairs: keymaster ID works on all tested platforms, but may be phased out,
         // so it seems a good idea to mimick the real clients. `self.session().client_id()` returns the
@@ -184,73 +181,11 @@ impl SpClient {
         // on macOS and Windows. On Android and iOS we can send a platform-specific client ID and are
         // then presented with a hash cash challenge. On Linux, we have to pass the old keymaster ID.
         // We delegate most of this logic to `SessionConfig`.
-        let os = OS;
         let client_id = match os {
             "macos" | "windows" => self.session().client_id(),
             os => SessionConfig::default_for_os(os).client_id,
         };
-        client_data.client_id = client_id;
-
-        let connectivity_data = client_data.mut_connectivity_sdk_data();
-        connectivity_data.device_id = self.session().device_id().to_string();
-
-        let platform_data = connectivity_data
-            .platform_specific_data
-            .mut_or_insert_default();
-
-        let os_version = os_version();
-        let kernel_version = System::kernel_version().unwrap_or_else(|| String::from("0"));
-
-        match os {
-            "windows" => {
-                let os_version = os_version.parse::<f32>().unwrap_or(10.) as i32;
-                let kernel_version = kernel_version.parse::<i32>().unwrap_or(21370);
-
-                let (pe, image_file) = match std::env::consts::ARCH {
-                    "arm" => (448, 452),
-                    "aarch64" => (43620, 452),
-                    "x86_64" => (34404, 34404),
-                    _ => (332, 332), // x86
-                };
-
-                let windows_data = platform_data.mut_desktop_windows();
-                windows_data.os_version = os_version;
-                windows_data.os_build = kernel_version;
-                windows_data.platform_id = 2;
-                windows_data.unknown_value_6 = 9;
-                windows_data.image_file_machine = image_file;
-                windows_data.pe_machine = pe;
-                windows_data.unknown_value_10 = true;
-            }
-            "ios" => {
-                let ios_data = platform_data.mut_ios();
-                ios_data.user_interface_idiom = 0;
-                ios_data.target_iphone_simulator = false;
-                ios_data.hw_machine = "iPhone14,5".to_string();
-                ios_data.system_version = os_version;
-            }
-            "android" => {
-                let android_data = platform_data.mut_android();
-                android_data.android_version = os_version;
-                android_data.api_version = 31;
-                "Pixel".clone_into(&mut android_data.device_name);
-                "GF5KQ".clone_into(&mut android_data.model_str);
-                "Google".clone_into(&mut android_data.vendor);
-            }
-            "macos" => {
-                let macos_data = platform_data.mut_desktop_macos();
-                macos_data.system_version = os_version;
-                macos_data.hw_model = "iMac21,1".to_string();
-                macos_data.compiled_cpu_type = std::env::consts::ARCH.to_string();
-            }
-            _ => {
-                let linux_data = platform_data.mut_desktop_linux();
-                linux_data.system_name = "Linux".to_string();
-                linux_data.system_release = kernel_version;
-                linux_data.system_version = os_version;
-                linux_data.hardware = std::env::consts::ARCH.to_string();
-            }
-        }
+        let request = client_data_request(os, client_id, self.session().device_id().to_string());
 
         let mut response = self.client_token_request(&request).await?;
         let mut count = 0;
@@ -985,6 +920,80 @@ fn playlist_range_endpoint(
     ))
 }
 
+/// Builds the client-token request for `os` (Smalltify fork F1: a pure function so the
+/// identity sent on iOS can be unit-tested without a session).
+fn client_data_request(os: &str, client_id: String, device_id: String) -> ClientTokenRequest {
+    let mut request = ClientTokenRequest::new();
+    request.request_type = ClientTokenRequestType::REQUEST_CLIENT_DATA_REQUEST.into();
+
+    let client_data = request.mut_client_data();
+    client_data.client_version = spotify_semantic_version_for(os);
+    client_data.client_id = client_id;
+
+    let connectivity_data = client_data.mut_connectivity_sdk_data();
+    connectivity_data.device_id = device_id;
+
+    let platform_data = connectivity_data
+        .platform_specific_data
+        .mut_or_insert_default();
+
+    let os_version = os_version();
+    let kernel_version = System::kernel_version().unwrap_or_else(|| String::from("0"));
+
+    match os {
+        "windows" => {
+            let os_version = os_version.parse::<f32>().unwrap_or(10.) as i32;
+            let kernel_version = kernel_version.parse::<i32>().unwrap_or(21370);
+
+            let (pe, image_file) = match std::env::consts::ARCH {
+                "arm" => (448, 452),
+                "aarch64" => (43620, 452),
+                "x86_64" => (34404, 34404),
+                _ => (332, 332), // x86
+            };
+
+            let windows_data = platform_data.mut_desktop_windows();
+            windows_data.os_version = os_version;
+            windows_data.os_build = kernel_version;
+            windows_data.platform_id = 2;
+            windows_data.unknown_value_6 = 9;
+            windows_data.image_file_machine = image_file;
+            windows_data.pe_machine = pe;
+            windows_data.unknown_value_10 = true;
+        }
+        "ios" => {
+            let ios_data = platform_data.mut_ios();
+            ios_data.user_interface_idiom = 0;
+            ios_data.target_iphone_simulator = false;
+            ios_data.hw_machine = "iPhone14,5".to_string();
+            ios_data.system_version = os_version;
+        }
+        "android" => {
+            let android_data = platform_data.mut_android();
+            android_data.android_version = os_version;
+            android_data.api_version = 31;
+            "Pixel".clone_into(&mut android_data.device_name);
+            "GF5KQ".clone_into(&mut android_data.model_str);
+            "Google".clone_into(&mut android_data.vendor);
+        }
+        "macos" => {
+            let macos_data = platform_data.mut_desktop_macos();
+            macos_data.system_version = os_version;
+            macos_data.hw_model = "iMac21,1".to_string();
+            macos_data.compiled_cpu_type = std::env::consts::ARCH.to_string();
+        }
+        _ => {
+            let linux_data = platform_data.mut_desktop_linux();
+            linux_data.system_name = "Linux".to_string();
+            linux_data.system_release = kernel_version;
+            linux_data.system_version = os_version;
+            linux_data.hardware = std::env::consts::ARCH.to_string();
+        }
+    }
+
+    request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,5 +1011,41 @@ mod tests {
                 .ends_with("&from=0&length=0"),
             "the header alone"
         );
+    }
+
+    #[test]
+    fn ios_client_token_request_presents_desktop_linux() {
+        let os = identity_os("ios");
+        assert_eq!(os, "linux");
+        let client_id = SessionConfig::default_for_os(os).client_id;
+        // E1: the desktop client ID Smalltify plays with.
+        assert_eq!(client_id, "65b708073fc0480ea92a077233ca87bd");
+
+        let request = client_data_request(os, client_id, "device".into());
+        let data = request.client_data();
+        assert_eq!(data.client_id, "65b708073fc0480ea92a077233ca87bd");
+        assert_eq!(
+            data.client_version,
+            crate::version::SPOTIFY_SEMANTIC_VERSION
+        );
+        let sdk = data.connectivity_sdk_data();
+        assert_eq!(sdk.device_id, "device");
+        let platform = sdk.platform_specific_data.get_or_default();
+        assert!(platform.has_desktop_linux());
+        assert!(!platform.has_ios());
+        assert_eq!(platform.desktop_linux().system_name, "Linux");
+    }
+
+    #[test]
+    fn other_identities_keep_their_platform_data() {
+        let android = client_data_request("android", "a".into(), "d".into());
+        let platform = android
+            .client_data()
+            .connectivity_sdk_data()
+            .platform_specific_data
+            .get_or_default();
+        assert!(platform.has_android());
+        assert_eq!(identity_os("macos"), "macos");
+        assert_eq!(identity_os("android"), "android");
     }
 }
